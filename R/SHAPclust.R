@@ -1,4 +1,4 @@
-#' @title Clustered SHAP Summary Plot
+#' @title SHAP clustering
 #' @description SHAP values are used to cluster data samples using the k-means method to identify subgroups of individuals with specific patterns of feature contributions.
 #'
 #' @param task an mlr3 task for binary classification
@@ -26,7 +26,7 @@
 #' @export
 #'
 #' @return A list containing four elements:
-#' \item{shap_plot_onerow}{A plotly interactive plot displaying the SHAP values for each feature, clustered by the specified number of clusters. Each cluster is shown in a facet.}
+#' \item{shap_plot_onerow}{An interactive plot displaying the SHAP values for each feature, clustered by the specified number of clusters. Each cluster is shown in a facet.}
 #' \item{combined_plot}{A ggplot2 figure combining confusion matrices for each cluster, providing insights into the model's performance within each identified subgroup.}
 #' \item{kmeans_fvals_desc}{A summary table containing statistical descriptions of the clusters based on feature values.}
 #' \item{shap_Mean_wide_kmeans}{A data frame containing clustered SHAP values along with predictions and ground truth information.}
@@ -99,9 +99,9 @@
 #' }
 #'
 #' @references
-#' For more details on SHAP analysis, refer to Lundberg, S. M., & Lee, S. I. (2017). A Unified Approach to Interpreting Model Predictions. In Advances in Neural Information Processing Systems (NIPS) (pp. 4765-4774).
+#' Zargari Marandi, R., 2024. ExplaineR: an R package to explain machine learning models. Bioinformatics advances, 4(1), p.vbae049, https://doi.org/10.1093/bioadv/vbae049.
 #'
-#' @seealso Other functions to visualize and interpret machine learning models: \code{\link{eSHAP_plot}}, \code{\link{plot_confusion_matrix}}, \code{\link{confusion_matrix}}.
+#' @seealso Other functions to visualize and interpret machine learning models: \code{\link{eSHAP_plot}}.
 #'
 #' @keywords clustering SHAP k-means machine-learning interpretability
 SHAPclust <- function(task,
@@ -115,36 +115,34 @@ SHAPclust <- function(task,
                       algorithm="Hartigan-Wong",
                       iter.max = 1000
                       ){
-
-  # utils::globalVariables(c("prediction_correctness", "truth", "response", "fval", "variable", "mean_absolute_shap", "feature", "value", "sample_num"))
-  prediction_correctness <- NULL
-  truth <- NULL
-  response <- NULL
-  fval <- NULL
-  variable <- NULL
-  mean_absolute_shap <- NULL
-  feature <- NULL
-  value <- NULL
-  sample_num <- NULL
   cluster <- NULL
+  correct_prediction <- NULL
+  feature <- NULL
+  f_val <- NULL
+  fval <- NULL
+  mean_absolute_shap <- NULL
+  mean_phi <- NULL
+  Phi <- NULL
+  pred_class <- NULL
+  pred_prob <- NULL
+  prediction_correctness <- NULL
+  response <- NULL
+  sample_num <- NULL
+  truth <- NULL
+  unscaled_f_val <- NULL
+  value <- NULL
+  variable <- NULL
+
   mydata <- task$data()
   # randomly subset the target variable and the corresponding rows
-  if (subset < 1) {
-    set.seed(seed) # set seed for reproducibility
-    n <- round(subset * length(splits$test))
-    target_index <- sample(splits$test, size = n, replace = FALSE)
-    mydata <- mydata[target_index, ]
 
-    # do the prediction for the test set
-    pred_results <- trained_model$predict(task,target_index)
+  set.seed(seed) # set seed for reproducibility
+  n <- round(subset * length(splits$test))
+  target_index <- sample(splits$test, size = n, replace = FALSE)
+  mydata <- mydata[target_index, ]
 
-  } else {
-    mydata <- mydata[splits$test, ]
-
-    # do the prediction for the test set
-    pred_results <- trained_model$predict(task,splits$test)
-
-  }
+  # do the prediction for the test set
+  pred_results <- trained_model$predict(task,target_index)
 
   # the test set based on the data split is used to calculate SHAP values
   test_set <- as.data.frame(mydata)
@@ -163,85 +161,69 @@ SHAPclust <- function(task,
 
   # save the statistical descriptions of the clusters by feature values
   kmeans_fvals_desc <- psych::describeBy(kmeans_fvals,group=kmeans_fvals$cluster)
-  # writexl::write_xlsx(psych::describeBy(kmeans_fvals,group=kmeans_fvals$cluster),
-  #                     path=paste0("shap_PL_kmeans_clusters",seed,".xlsx"))
-
   shap_Mean_wide_kmeans$row_ids <- shap_Mean_wide_kmeans$row_ids - shap_Mean_wide_kmeans$row_ids[1] + 1
-  #set(shap_Mean_wide_kmeans, j = "prediction_correctness", value = (truth == response))
-
   shap_Mean_wide_kmeans[, prediction_correctness := (truth == response)]
-
-  # # save the clustered data along with the predictions and shap values
-  # writexl::write_xlsx(shap_Mean_wide_kmeans, path=paste0("shap_PL_kmeans_clusters_detailed",seed,".xlsx"))
-
-
   shap_Mean_wide_kmeans_forCM <- shap_Mean_wide_kmeans
-  shap_Mean_wide_kmeans[,c(1,2,3,4,5)] <- NULL
+
+  shap_Mean_wide_kmeans[,c(1,2,5)] <- NULL # ,3,4
+  colnames(shap_Mean_wide_kmeans)[2] <- "prob_positive_class"
   variables_for_long_format <- colnames(shap_Mean_wide_kmeans)
 
-  variables_for_long_format <- variables_for_long_format[!variables_for_long_format %in% c(colnames(pred_results), "sample_num", "prediction_correctness", "cluster")]
+  variables_for_long_format <- variables_for_long_format[!variables_for_long_format %in% c("sample_num", "prediction_correctness", "cluster","response","prob_positive_class")]
 
   # Melt the data.table from wide to long format
-  dt_long <- data.table::melt(shap_Mean_wide_kmeans, id.vars = c("sample_num","prediction_correctness","cluster"),
+  dt_long <- data.table::melt(shap_Mean_wide_kmeans,
+                              id.vars = c("sample_num", "prediction_correctness", "cluster","response","prob_positive_class"),
                               measure.vars = variables_for_long_format,
                               variable.name = "variable",
                               value.name = "value")
 
-  dt_long$fval <- NA
-  dt_long_vars <- as.character(dt_long$variable)
-  for (i in 1:nrow(dt_long)){
-    dt_long$mean_absolute_shap[i] <- mean(abs(dt_long$value[dt_long$variable==dt_long$variable[i]]))
-    idx <- which(row(test_set)[,1]==dt_long$sample_num[i])
-    dt_long$fval[i] <- test_set[idx, which(colnames(test_set)==dt_long_vars[idx])]
-  }
+  # Remove specified columns
+  dt_long[, c("response", "prob_positive_class", "prediction_correctness") := NULL]
+  # Rename columns
+  names(dt_long)[names(dt_long) == "variable"] <- "feature"
+  names(dt_long)[names(dt_long) == "value"] <- "Phi"
 
-  dt_long$fval <- as.numeric(dt_long$fval)
-  dt_long[, fval := lapply(.SD, range01), by = variable, .SDcols = "fval"]
-
+  # Merge the two dataframes
+  dt_long <- merge(dt_long, shap_Mean_long, by = c("sample_num", "feature", "Phi"))
+  print(dt_long)
   ############## SHAP plots for clusters
   shap_plot1 <- dt_long %>%
-    mutate(feature = forcats::fct_reorder(variable, mean_absolute_shap)) %>%
-    ggplot(aes(x = feature, y = value, color = fval))+
+    mutate(feature = forcats::fct_reorder(feature, mean_phi)) %>%
+    ggplot(aes(x = feature, y = Phi, color = f_val))+
     geom_violin(colour = "grey") +
     geom_line(aes(group = sample_num), alpha = 0.1,size=0.2) +
     coord_flip() +
-    geom_jitter(alpha = 0.6,size=0.6, position=position_jitter(width=0.2, height=0),aes(shape=prediction_correctness)) +
-    scale_shape_manual(values=c(13, 21))+
-    labs(shape = "correct prediction") +
-    scale_colour_gradient2(low="blue" ,mid="green", high="red", midpoint=0.5,breaks=c(0,1), labels=c("Low","High")) +
-    geom_text(aes(x = feature, y=-Inf, label = ""),hjust = -0.2, alpha = 0.7, color = "black") + # sprintf("%.3f", mean_phi)
-    theme(axis.line.y = element_blank(), axis.ticks.y = element_blank(),
-          legend.position="right") +
-    geom_hline(yintercept = 0, color = "grey", alpha = 0.5) + # the vertical line
+    geom_jitter(aes(shape=correct_prediction, text = paste("Feature: ", feature,
+                                                           "<br>Unscaled feature value: ", unscaled_f_val,
+                                                           "<br>SHAP value: ", Phi,
+                                                           "<br>Prediction correctness: ", correct_prediction,
+                                                           "<br>Predicted probability: ", pred_prob,
+                                                           "<br>Predicted class: ", pred_class)),
+                alpha = 0.6, size=1.5, position=position_jitter(width=0.2, height=0)) +
+    scale_shape_manual(values = c(4, 19)) +  # 19 for correct predictions (circle), 4 for incorrect predictions (cross)
+    labs(shape = "model prediction") +
+    scale_colour_gradient2(low = "blue", mid = "green", high = "red", midpoint = 0.5, breaks = c(0, 1), labels = c("Low", "High")) +
+    geom_text(aes(x = feature, y = -Inf, label = ""), hjust = -0.2, alpha = 0.7, color = "black") +
+    theme(axis.line.y = element_blank(), axis.ticks.y = element_blank(), legend.position = "right") +
+    geom_hline(yintercept = 0, color = "grey", alpha = 0.5) +
     labs(y = "SHAP decision plot - test set", x = "features", color = "feature values scaled\n to [low=0 high=1]") +
-    theme(text = element_text(size = 8, family="Helvetica"),
-          # Remove panel border
-          panel.border = element_blank(),
-          # Remove panel grid lines
-          panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          # Remove panel background
-          panel.background = element_blank(),
-          # Add axis line
-          axis.line = element_line(colour = "grey"),
-          legend.key.width = grid::unit(2,"mm")) +
-    ylim(min(dt_long$value)-0.05, max(dt_long$value)+0.05)
+    theme(text = element_text(size = 8, family = "Helvetica"), panel.border = element_blank(),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(),
+          axis.line = element_line(colour = "grey"), legend.key.width = grid::unit(2, "mm")) +
+    ylim(min(dt_long$Phi) - 0.05, max(dt_long$Phi) + 0.05) +
+    guides(
+      shape = ggplot2::guide_legend(color = "black")
+    )
 
-  # shap_plot_tworows <- shap_plot1 + facet_wrap(~ cluster, ncol = 2) # , scales = "free"
   shap_plot_onerow <- shap_plot1 + facet_wrap(~ cluster, ncol = num_of_clusters)
 
-  # ggsave(filename = paste0("SHAP_clusters_kmeans",seed,".pdf"),
-  #        plot = shap_plot_onerow,
-  #        width = 200,
-  #        units = "mm")
-  shap_plot_onerow <- ggplotly(shap_plot_onerow)
-
-  # # Create confusion matrix
+  shap_plot_onerow <- ggplotly(shap_plot_onerow, tooltip="text")
 
   CM_plt <- list()
   # Create a tibble for each cluster and calculate the confusion matrix for each cluster
   for (i in 1:num_of_clusters) {
-    d_binomial <- tibble("Truth" = shap_Mean_wide_kmeans_forCM$truth[which(shap_Mean_wide_kmeans_forCM$cluster==i)],
+    d_binomial <- tibble::tibble("Truth" = shap_Mean_wide_kmeans_forCM$truth[which(shap_Mean_wide_kmeans_forCM$cluster==i)],
                          "Prediction" = shap_Mean_wide_kmeans_forCM$response[which(shap_Mean_wide_kmeans_forCM$cluster==i)])
     cvms::confusion_matrix(targets = d_binomial$Truth, predictions = d_binomial$Prediction)
     # basic_table <- table(d_binomial)
@@ -250,7 +232,7 @@ SHAPclust <- function(task,
 
     cm_tbl <- data.frame(matrix(nrow = 4, ncol = 3))
     colnames(cm_tbl) <- c("Target", "Prediction", "N")
-    cm_tbl <- as_tibble(cm_tbl)
+    cm_tbl <- tibble::as_tibble(cm_tbl)
     cm_tbl[1:2,1] <- levels(d_binomial$Truth)[1]
     cm_tbl[3:4,1] <- levels(d_binomial$Truth)[2]
     cm_tbl[1,2] <- levels(d_binomial$Truth)[1]
@@ -269,20 +251,11 @@ SHAPclust <- function(task,
     CM_plt[[i]][["theme"]][["text"]][["family"]] <- 'Helvetica'
 
     # Add the cluster number to the title of each plot
-    title <- paste("Cluster", i)
-    CM_plt[[i]] <- CM_plt[[i]] + ggtitle(title) + theme(plot.title = element_text(hjust = 0.5))
+    CM_plt[[i]] <- CM_plt[[i]] + ggtitle(paste("Cluster", i)) + theme(plot.title = element_text(hjust = 0.5))
   }
 
   # Combine the plots into one figure
   combined_plot <- ggpubr::ggarrange(plotlist = CM_plt, ncol = num_of_clusters)
-
-  # ggsave("confusion_matrices.pdf", combined_plot,
-  #        width = 200,
-  #        units = "mm")
-  #
-  # # Adjust the size of each plot and the spacing between the plots
-  # ggsave("confusion_matrices.pdf", combined_plot)
-  # ggsave("confusion_matrices.png", combined_plot, dpi = 300)
 
   return(list(shap_plot_onerow, combined_plot, kmeans_fvals_desc, shap_Mean_wide_kmeans, kmeans_info))
 
